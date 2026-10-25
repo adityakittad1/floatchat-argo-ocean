@@ -19,3 +19,6 @@ backend/.env
 
 # OS metadata
 .DS_Store
+
+# UV lockfile (use requirements.txt for Streamlit Community Cloud)
+uv.lock
