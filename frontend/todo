@@ -1,0 +1,7 @@
+# FloatChat Architecture & Milestone Status - Autonomous Ocean Intelligence Platform
+
+[x] 1. Closing dialog: Fixed using Streamlit's native @st.dialog modal system (closes on Close button, click outside, or ESC).
+[x] 2. NetCDF to SQL converter: Implemented full parser with xarray/netCDF4, instant SQL file download via st.download_button, and direct import into SQLite database (argo.db) with modal confirmation dialog.
+[x] 3. Session persistence: Fixed using secure URL session tokens with SHA-256 verification. Browser reload keeps user logged in. Logout cleanly clears session.
+[x] 4. Backend MCP Server: Configured Model Context Protocol (MCP) server & client with dual-mode execution (LLM + robust domain NL-to-SQL fallback).
+[x] 5. End-to-end browser validation: Completed and verified across all pages.

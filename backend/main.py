@@ -1,0 +1,125 @@
+import os
+import sys
+
+# Ensure backend root is in sys.path
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if _BASE_DIR not in sys.path:
+    sys.path.insert(0, _BASE_DIR)
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Dict, Any
+from contextlib import asynccontextmanager
+from mcps.mcp_client import MCPClient
+from dotenv import load_dotenv
+from pydantic_settings import BaseSettings
+import uvicorn
+
+load_dotenv()
+
+class Settings(BaseSettings):
+    server_script_path: str = os.path.join(_BASE_DIR, "mcps", "mcp_server.py")
+
+settings = Settings()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    client = MCPClient()
+    try:
+        connected = await client.connect_to_server(settings.server_script_path)
+        if not connected:
+            raise HTTPException(status_code=500, detail="Failed to connect to MCP server")
+        app.state.client = client
+        yield
+    except Exception as e:
+        print(f"Error during lifespan: {e}")
+        raise e
+    finally:
+        await client.cleanup()
+
+app = FastAPI(
+    title="FloatChat - ARGO MCP Backend API",
+    description="Model Context Protocol (MCP) Backend for Autonomous ARGO Float Ocean Data Discovery & Visualization",
+    version="2.0.0",
+    lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class QueryRequest(BaseModel):
+    query: str
+
+class Message(BaseModel):
+    role: str
+    content: Any
+
+class ToolCallRequest(BaseModel):
+    name: str
+    args: Dict[str, Any]
+
+@app.get("/")
+async def root():
+    """Root health check endpoint."""
+    return {
+        "status": "online",
+        "service": "FloatChat ARGO MCP Server",
+        "version": "1.0.0",
+        "endpoints": ["/tools", "/get_schema", "/query", "/get_sql_query", "/health"]
+    }
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "mcp_connected": hasattr(app.state, "client") and app.state.client.session is not None}
+
+@app.post("/get_schema")
+async def get_schema():
+    """Get the table schema from the MCP server."""
+    try:
+        schema = await app.state.client.get_table_schema()
+        return {"schema": schema}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/query")
+async def process_query(request: QueryRequest):
+    """Process a user query and return the response."""
+    try:
+        messages = await app.state.client.process_query(request.query)
+        return {"messages": messages}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/get_sql_query")
+async def get_sql_query(request: QueryRequest):
+    """Get the SQL query generated from a natural language question."""
+    try:
+        sql_query = await app.state.client.get_sql_query(request.query)
+        return {"sql_query": sql_query}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/tools")
+async def get_tools():
+    """Get the list of available tools."""
+    try:
+        tools = await app.state.client.get_mcp_tools()
+        return {"tools": [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+            }
+            for tool in tools
+        ]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
