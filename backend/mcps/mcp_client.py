@@ -24,6 +24,7 @@ class MCPClient:
         self.tools = []
         self.messages = []
         self.logger = logger
+        self.server_script_path: Optional[str] = None
 
         # Initialize optional Anthropic client
         api_key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -35,6 +36,7 @@ class MCPClient:
                 self.logger.warning(f"Anthropic initialization skipped: {e}")
 
     async def connect_to_server(self, server_script_path: str):
+        self.server_script_path = server_script_path
         try:
             is_python = server_script_path.endswith(".py")
             is_js = server_script_path.endswith(".js")
@@ -58,7 +60,7 @@ class MCPClient:
             )
 
             await self.session.initialize()
-            self.logger.info("Connected to MCP server")
+            self.logger.info("Connected to MCP server (AI Agent Online & Awake)")
 
             mcp_tools = await self.get_mcp_tools()
 
@@ -79,6 +81,31 @@ class MCPClient:
             traceback.print_exc()
             raise e
 
+    async def ensure_connected(self) -> bool:
+        """Auto-reconnects to MCP server if session was dropped, closed, or never initialized."""
+        if self.session is not None:
+            try:
+                # Fast heartbeat ping to verify stdio is alive
+                await self.session.list_tools()
+                return True
+            except Exception as e:
+                self.logger.warning(f"MCP session health check failed ({e}), initiating auto-recovery...")
+                try:
+                    await self.cleanup()
+                except Exception:
+                    pass
+                self.session = None
+                self.exit_stack = AsyncExitStack()
+
+        if self.server_script_path:
+            try:
+                self.logger.info("Attempting automatic reconnection to MCP server...")
+                return await self.connect_to_server(self.server_script_path)
+            except Exception as e:
+                self.logger.error(f"Auto-recovery reconnect failed: {e}")
+                return False
+        return False
+
     async def get_mcp_tools(self):
         try:
             response = await self.session.list_tools()
@@ -89,6 +116,7 @@ class MCPClient:
 
     async def get_table_schema(self):
         try:
+            await self.ensure_connected()
             response = await self.session.call_tool("get_schema", {})
             return response
         except Exception as e:
@@ -145,7 +173,14 @@ class MCPClient:
 
     async def process_query(self, query: str):
         try:
+            # Ensure connection is fresh and active before processing
+            await self.ensure_connected()
             self.logger.info(f"Processing query: {query}")
+
+            # Keep message history bounded to prevent context exhaustion or memory leak
+            if len(self.messages) > 16:
+                self.messages = self.messages[-16:]
+
             user_message = {"role": "user", "content": query}
             self.messages.append(user_message)
 
@@ -171,7 +206,13 @@ class MCPClient:
                             tool_args = content.input
                             tool_use_id = content.id
                             self.logger.info(f"Calling MCP tool: {tool_name} with args: {tool_args}")
-                            result = await self.session.call_tool(tool_name, tool_args)
+                            try:
+                                result = await self.session.call_tool(tool_name, tool_args)
+                            except Exception as tool_err:
+                                self.logger.warning(f"Tool call failed ({tool_err}), auto-reconnecting MCP...")
+                                await self.ensure_connected()
+                                result = await self.session.call_tool(tool_name, tool_args)
+
                             self.messages.append({
                                 "role": "user",
                                 "content": [
@@ -191,8 +232,14 @@ class MCPClient:
                     self.logger.warning(f"LLM tool calling encountered an issue ({e}). Using direct MCP tool execution.")
 
             if not used_llm:
-                # Direct MCP Tool Execution via the MCP session
-                tool_res = await self.session.call_tool("get_query_response", {"query": query})
+                # Direct MCP Tool Execution via the MCP session with auto-healing retry
+                try:
+                    tool_res = await self.session.call_tool("get_query_response", {"query": query})
+                except Exception as call_err:
+                    self.logger.warning(f"Direct MCP tool call failed ({call_err}), auto-reconnecting...")
+                    await self.ensure_connected()
+                    tool_res = await self.session.call_tool("get_query_response", {"query": query})
+
                 raw_text = ""
                 if hasattr(tool_res, "content"):
                     for item in tool_res.content:
@@ -230,7 +277,13 @@ class MCPClient:
 
     async def get_sql_query(self, query: str):
         try:
-            response = await self.session.call_tool("get_query_response", {"query": query})
+            await self.ensure_connected()
+            try:
+                response = await self.session.call_tool("get_query_response", {"query": query})
+            except Exception as e:
+                self.logger.warning(f"get_sql_query failed ({e}), reconnecting...")
+                await self.ensure_connected()
+                response = await self.session.call_tool("get_query_response", {"query": query})
             return response
         except Exception as e:
             self.logger.error(f"Failed to get SQL query: {e}")

@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import httpx
 import asyncio
 import time
@@ -252,17 +253,10 @@ class ArgoApp:
         self._ensure_backend_running()
 
     def _ensure_backend_running(self):
-        """Ensures FastAPI MCP backend is active; automatically starts it in a background thread if needed for 1-click cloud deployments (Streamlit Community Cloud / HuggingFace)."""
-        if "backend_started" in st.session_state:
+        """Ensures FastAPI MCP backend is active; automatically starts and supervises it in a background thread if needed for 1-click cloud deployments (Streamlit Community Cloud / HuggingFace) or standalone execution."""
+        if self.check_backend_health():
             return
-        st.session_state["backend_started"] = True
-        try:
-            r = httpx.get(f"{self.api_url}/health", timeout=0.6)
-            if r.status_code == 200:
-                return
-        except Exception:
-            pass
-        
+
         # Start backend in a background daemon thread
         import threading
         def _run_server():
@@ -279,6 +273,43 @@ class ArgoApp:
 
         t = threading.Thread(target=_run_server, daemon=True)
         t.start()
+
+    def inject_keep_alive(self):
+        """Injects client-side keep-awake engine into the browser:
+        1. Screen WakeLock API: Prevents user's OS and display from sleeping while FloatChat is open in browser.
+        2. Heartbeat Ping: Periodically pings Streamlit health endpoint every 25s so WebSocket never drops or times out.
+        """
+        keep_alive_js = """
+        <script>
+        (function() {
+            // 1. Keep OS & Screen awake via modern WakeLock API
+            let wakeLock = null;
+            async function requestWakeLock() {
+                try {
+                    if ('wakeLock' in navigator) {
+                        wakeLock = await navigator.wakeLock.request('screen');
+                    }
+                } catch (err) {}
+            }
+            requestWakeLock();
+            document.addEventListener('visibilitychange', () => {
+                if (wakeLock !== null && document.visibilityState === 'visible') {
+                    requestWakeLock();
+                }
+            });
+
+            // 2. Active Session Heartbeat ping (every 25 seconds) to prevent WebSocket timeout
+            if (!window._floatchatKeepAlive) {
+                window._floatchatKeepAlive = setInterval(() => {
+                    try {
+                        fetch(window.location.origin + '/_stcore/health', { cache: 'no-store' }).catch(() => {});
+                    } catch (e) {}
+                }, 25000);
+            }
+        })();
+        </script>
+        """
+        components.html(keep_alive_js, height=0, width=0)
 
     def _init_session_state(self):
         """Initializes and synchronizes all session state keys on every execution to ensure zero KeyErrors across any browser session, reload, or cloud deployment."""
@@ -989,9 +1020,15 @@ class ArgoApp:
                         <span style="color: #94a3b8; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">System Engine</span>
                         <span style="color: {badge_color}; font-weight: 700; font-size: 0.78rem; text-shadow: 0 0 10px {badge_color};">● {status_text}</span>
                     </div>
-                    <div style="color: #64748b; font-size: 0.73rem; display: flex; justify-content: space-between;">
+                    <div style="color: #64748b; font-size: 0.73rem; display: flex; justify-content: space-between; margin-bottom: 4px;">
                         <span>Live Database:</span>
                         <span style="color: #38bdf8; font-weight: 600;">argo.db (777+ rows)</span>
+                    </div>
+                    <div style="padding-top: 5px; border-top: 1px solid rgba(255,255,255,0.08); display: flex; justify-content: space-between; align-items: center; font-size: 0.73rem;">
+                        <span style="color: #94a3b8;">24/7 Keep-Alive:</span>
+                        <span style="color: #10b981; font-weight: 600; display: inline-flex; align-items: center; gap: 4px;">
+                            🛡️ Guard Active (No Sleep)
+                        </span>
                     </div>
                 </div>
                 """,
@@ -1983,6 +2020,7 @@ class ArgoApp:
         self._init_session_state()
 
         self.setup_custom_css()
+        self.inject_keep_alive()
 
         if not st.session_state.get("authenticated", False):
             self.login_page()

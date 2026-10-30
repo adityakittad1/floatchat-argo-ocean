@@ -28,21 +28,27 @@ _DB_PATH = os.path.join(_BACKEND_DIR, "argo.db")
 _db_uri = f"sqlite:///{_DB_PATH.replace(os.sep, '/')}"
 
 def _init_sqlite_db():
-    """Load CSV files into a local SQLite database (runs once on import)."""
+    """Load CSV files into a local SQLite database if tables do not exist yet."""
     engine = sqlalchemy.create_engine(_db_uri)
     csv_map = {
         "profile":    os.path.join(_BACKEND_DIR, "profile_df.csv"),
         "tech":       os.path.join(_BACKEND_DIR, "tech.csv"),
         "trajectory": os.path.join(_BACKEND_DIR, "trajectory.csv"),
     }
+    try:
+        inspector = sqlalchemy.inspect(engine)
+        existing_tables = inspector.get_table_names()
+    except Exception:
+        existing_tables = []
+
     with engine.begin() as conn:
         for table_name, csv_path in csv_map.items():
-            if os.path.exists(csv_path):
+            if table_name not in existing_tables and os.path.exists(csv_path):
                 df = pd.read_csv(csv_path)
                 # Normalize column names to lowercase
                 df.columns = [c.lower() for c in df.columns]
                 df.to_sql(table_name, conn, if_exists="replace", index=False)
-                _log(f"[argo-db] Loaded {len(df)} rows -> table '{table_name}'")
+                _log(f"[argo-db] Initialized {len(df)} rows -> table '{table_name}'")
 
 _init_sqlite_db()
 
